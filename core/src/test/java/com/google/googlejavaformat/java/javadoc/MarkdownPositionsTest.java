@@ -66,6 +66,54 @@ public final class MarkdownPositionsTest {
   }
 
   @Test
+  public void listWithParenthesis() {
+    String text =
+"""
+1) foo
+2) bar
+""";
+    var positions = MarkdownPositions.parse(text);
+    ImmutableListMultimap<Integer, Token> map = positionToToken(positions, text);
+    int firstItem = text.indexOf('1');
+    int secondItem = text.indexOf('2');
+    int end = text.length() - 1;
+    ImmutableListMultimap<Integer, Token> expected =
+        ImmutableListMultimap.<Integer, Token>builder()
+            .put(firstItem, new ListOpenTag(""))
+            .put(firstItem, new ListItemOpenTag("1) "))
+            .put(secondItem - 1, new ListItemCloseTag(""))
+            .put(secondItem, new ListItemOpenTag("2) "))
+            .put(end, new ListItemCloseTag(""))
+            .put(end, new ListCloseTag(""))
+            .build();
+    assertThat(map).isEqualTo(expected);
+  }
+
+  @Test
+  public void listWithPlus() {
+    String text =
+"""
++ foo
++ bar
+""";
+    var positions = MarkdownPositions.parse(text);
+    ImmutableListMultimap<Integer, Token> map = positionToToken(positions, text);
+    int firstItem = text.indexOf('+');
+    int secondItem = text.lastIndexOf('+');
+    int end = text.length() - 1;
+    ImmutableListMultimap<Integer, Token> expected =
+        ImmutableListMultimap.<Integer, Token>builder()
+            .put(firstItem, new ListOpenTag(""))
+            .put(firstItem, new ListItemOpenTag("+ "))
+            .put(secondItem - 1, new ListItemCloseTag(""))
+            .put(secondItem, new ListItemOpenTag("+ "))
+            .put(end, new ListItemCloseTag(""))
+            .put(end, new ListCloseTag(""))
+            .build();
+    assertThat(map).isEqualTo(expected);
+  }
+
+  @Test
   public void heading() {
     String text =
 """

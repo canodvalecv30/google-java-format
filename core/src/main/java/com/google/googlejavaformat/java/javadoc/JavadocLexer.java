@@ -14,7 +14,6 @@
 
 package com.google.googlejavaformat.java.javadoc;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.Iterators.peekingIterator;
@@ -28,8 +27,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.PeekingIterator;
 import com.google.googlejavaformat.java.javadoc.Token.BeginJavadoc;
-import com.google.googlejavaformat.java.javadoc.Token.BlockquoteCloseTag;
-import com.google.googlejavaformat.java.javadoc.Token.BlockquoteOpenTag;
+import com.google.googlejavaformat.java.javadoc.Token.BlockQuoteCloseTag;
+import com.google.googlejavaformat.java.javadoc.Token.BlockQuoteMarker;
+import com.google.googlejavaformat.java.javadoc.Token.BlockQuoteOpenTag;
 import com.google.googlejavaformat.java.javadoc.Token.BrTag;
 import com.google.googlejavaformat.java.javadoc.Token.CodeCloseTag;
 import com.google.googlejavaformat.java.javadoc.Token.CodeOpenTag;
@@ -44,6 +44,8 @@ import com.google.googlejavaformat.java.javadoc.Token.ListItemCloseTag;
 import com.google.googlejavaformat.java.javadoc.Token.ListItemOpenTag;
 import com.google.googlejavaformat.java.javadoc.Token.ListOpenTag;
 import com.google.googlejavaformat.java.javadoc.Token.Literal;
+import com.google.googlejavaformat.java.javadoc.Token.MarkdownBlockQuoteClose;
+import com.google.googlejavaformat.java.javadoc.Token.MarkdownBlockQuoteOpen;
 import com.google.googlejavaformat.java.javadoc.Token.MarkdownCodeSpanEnd;
 import com.google.googlejavaformat.java.javadoc.Token.MarkdownCodeSpanStart;
 import com.google.googlejavaformat.java.javadoc.Token.MarkdownHardLineBreak;
@@ -73,16 +75,8 @@ final class JavadocLexer {
     input = normalizeLineEndings(input);
     MarkdownPositions markdownPositions;
     if (classicJavadoc) {
-      /*
-       * TODO(cpovirk): In theory, we should interpret Unicode escapes (yet output them in their
-       * original form). This would mean mean everything from an encoded ∕✱✱ to an encoded <pre>
-       * tag, so we'll probably never bother.
-       */
-      input = stripJavadocBeginAndEnd(input);
       markdownPositions = MarkdownPositions.EMPTY;
     } else {
-      checkArgument(input.startsWith("///"));
-      input = input.substring("///".length());
       try {
         markdownPositions = MarkdownPositions.parse(input);
       } catch (UnsupportedOperationException e) {
@@ -100,16 +94,6 @@ final class JavadocLexer {
   }
 
   private static final Pattern NON_UNIX_LINE_ENDING = Pattern.compile("\r\n?");
-
-  private static String stripJavadocBeginAndEnd(String input) {
-    /*
-     * We do this ahead of time so that the main part of the lexer need not say things like
-     * "(?![*]/)" to avoid accidentally swallowing ✱∕ when consuming a newline.
-     */
-    checkArgument(input.startsWith("/**"), "Missing /**: %s", input);
-    checkArgument(input.endsWith("*/") && input.length() > 4, "Missing */: %s", input);
-    return input.substring("/**".length(), input.length() - "*/".length());
-  }
 
   /**
    * An element of the nested contexts we might be in. For example, if we are inside {@code
@@ -139,7 +123,10 @@ final class JavadocLexer {
      * An inline tag such as {@code {@link ...}} or {@code {@code ...}}, but not {@code {@snippet
      * ...}}.
      */
-    INLINE_TAG_CONTEXT
+    INLINE_TAG_CONTEXT,
+
+    /** Markdown {@code >}. */
+    BLOCKQUOTE
   }
 
   private final CharStream input;
@@ -171,21 +158,7 @@ final class JavadocLexer {
         // assumed that there are no other tokens (markdown or otherwise) in a non-empty text span
         // covered by a markdown token.
         for (Token markdownToken : markdownPositions.tokensAt(input.position())) {
-          // For `...`, we switch to MARKDOWN_CODE_CONTEXT for the duration of the span, and we
-          // change the start or end token to a Literal so it will get joined to adjacent Literal
-          // tokens. That prevents line breaks adjacent to the backticks in "foo`bar`baz", but still
-          // allows them at the spaces in "foo `bar` baz" or "foo` bar `baz".
-          switch (markdownToken) {
-            case MarkdownCodeSpanStart unused -> {
-              contextStack.push(NestingContext.MARKDOWN_CODE_CONTEXT);
-              markdownToken = new Literal(markdownToken.value());
-            }
-            case MarkdownCodeSpanEnd unused -> {
-              contextStack.popUntil(NestingContext.MARKDOWN_CODE_CONTEXT);
-              markdownToken = new Literal(markdownToken.value());
-            }
-            default -> {}
-          }
+          markdownToken = processMarkdownToken(markdownToken);
           tokens.add(markdownToken);
           if (!markdownToken.value().isEmpty()) {
             boolean consumed = input.tryConsume(markdownToken.value());
@@ -200,6 +173,11 @@ final class JavadocLexer {
       }
       token = readToken();
       tokens.add(token);
+    }
+
+    for (Token markdownToken : markdownPositions.tokensAt(input.position())) {
+      markdownToken = processMarkdownToken(markdownToken);
+      tokens.add(markdownToken);
     }
 
     checkMatchingTags();
@@ -217,6 +195,31 @@ final class JavadocLexer {
     return result;
   }
 
+  private Token processMarkdownToken(Token markdownToken) {
+    // For `...`, we switch to MARKDOWN_CODE_CONTEXT for the duration of the span, and we change the
+    // start or end token to a Literal so it will get joined to adjacent Literal tokens. That
+    // prevents line breaks adjacent to the backticks in "foo`bar`baz", but still allows them at the
+    // spaces in "foo `bar` baz" or "foo` bar `baz".
+    switch (markdownToken) {
+      case MarkdownCodeSpanStart unused -> {
+        contextStack.push(NestingContext.MARKDOWN_CODE_CONTEXT);
+        return new Literal(markdownToken.value());
+      }
+      case MarkdownCodeSpanEnd unused -> {
+        contextStack.popUntil(NestingContext.MARKDOWN_CODE_CONTEXT);
+        return new Literal(markdownToken.value());
+      }
+      case MarkdownBlockQuoteOpen unused -> {
+        contextStack.push(NestingContext.BLOCKQUOTE);
+      }
+      case MarkdownBlockQuoteClose unused -> {
+        contextStack.popUntil(NestingContext.BLOCKQUOTE);
+      }
+      default -> {}
+    }
+    return markdownToken;
+  }
+
   private Token readToken() throws LexException {
     Function<String, Token> tokenFactory = consumeToken();
     String value = input.readAndResetRecorded();
@@ -226,11 +229,19 @@ final class JavadocLexer {
   private Function<String, Token> consumeToken() throws LexException {
     boolean preserveExistingFormatting = preserveExistingFormatting();
 
-    Pattern newlinePattern = classicJavadoc ? CLASSIC_NEWLINE_PATTERN : MARKDOWN_NEWLINE_PATTERN;
-    if (input.tryConsumeRegex(newlinePattern)) {
+    if (input.tryConsumeRegex(NEWLINE_PATTERN)) {
       somethingSinceNewline = false;
       return preserveExistingFormatting ? ForcedNewline::new : Whitespace::new;
-    } else if (input.tryConsume(" ") || input.tryConsume("\t")) {
+    }
+
+    if (!classicJavadoc
+        && !somethingSinceNewline
+        && contextStack.contains(NestingContext.BLOCKQUOTE)
+        && input.tryConsumeRegex(BLOCKQUOTE_MARKER_PATTERN)) {
+      return BlockQuoteMarker::new;
+    }
+
+    if (input.tryConsume(" ") || input.tryConsume("\t")) {
       // TODO(cpovirk): How about weird whitespace chars? Ideally we'd distinguish breaking vs. not.
       // Returning Literal here prevents us from breaking a <pre> line. For more info, see Literal.
       return preserveExistingFormatting ? Literal::new : Whitespace::new;
@@ -350,9 +361,9 @@ final class JavadocLexer {
     } else if (input.tryConsumeRegex(LIST_ITEM_CLOSE_PATTERN)) {
       return ListItemCloseTag::new;
     } else if (input.tryConsumeRegex(BLOCKQUOTE_OPEN_PATTERN)) {
-      return BlockquoteOpenTag::new;
+      return BlockQuoteOpenTag::new;
     } else if (input.tryConsumeRegex(BLOCKQUOTE_CLOSE_PATTERN)) {
-      return BlockquoteCloseTag::new;
+      return BlockQuoteCloseTag::new;
     } else if (input.tryConsumeRegex(HEADER_OPEN_PATTERN)) {
       return HeaderOpenTag::new;
     } else if (input.tryConsumeRegex(HEADER_CLOSE_PATTERN)) {
@@ -388,9 +399,9 @@ final class JavadocLexer {
    * ["<b>foo</b>"]}. See {@link #literalPattern()} for discussion of why those tokens are separate
    * to begin with.
    *
-   * <p>Whitespace tokens are treated analogously. We don't really "want" to join whitespace tokens,
-   * but in the course of joining literals, we incidentally join whitespace, too. We do take
-   * advantage of the joining later on: It simplifies {@link #inferParagraphTags}.
+   * <p>Whitespace tokens are treated analogously. The joining of whitespace tokens allows our
+   * Markdown output to detect "loose lists" and our Traditional output to {@linkplain
+   * #inferParagraphTags infer where to place paragraph tags}.
    *
    * <p>Note that we do <i>not</i> merge a literal token and a whitespace token together.
    */
@@ -419,14 +430,15 @@ final class JavadocLexer {
        */
 
       if (accumulated.isEmpty()) {
-        output.add(tokens.next());
+        if (tokens.peek() instanceof Whitespace) {
+          output.add(new Whitespace(consumeAdjacentWhitespace(tokens)));
+        } else {
+          output.add(tokens.next());
+        }
         continue;
       }
 
-      StringBuilder seenWhitespace = new StringBuilder();
-      while (tokens.peek() instanceof Whitespace) {
-        seenWhitespace.append(tokens.next().value());
-      }
+      String seenWhitespace = consumeAdjacentWhitespace(tokens);
 
       if (tokens.peek() instanceof Literal literal && literal.value().startsWith("@")) {
         // OK, we're in the case described above.
@@ -439,10 +451,10 @@ final class JavadocLexer {
       accumulated.setLength(0);
 
       if (!seenWhitespace.isEmpty()) {
-        output.add(new Whitespace(seenWhitespace.toString()));
+        output.add(new Whitespace(seenWhitespace));
       }
 
-      // We have another token coming, possibly of type OTHER. Leave it for the next iteration.
+      // We have another token coming. Leave it for the next iteration.
     }
 
     /*
@@ -450,6 +462,14 @@ final class JavadocLexer {
      * /[^ -]-/, as in "non-\nblocking."
      */
     return output.build();
+  }
+
+  private static String consumeAdjacentWhitespace(PeekingIterator<Token> tokens) {
+    StringBuilder seenWhitespace = new StringBuilder();
+    while (tokens.peek() instanceof Whitespace) {
+      seenWhitespace.append(tokens.next().value());
+    }
+    return seenWhitespace.toString();
   }
 
   /**
@@ -635,19 +655,24 @@ final class JavadocLexer {
 
   private static final CharMatcher NEWLINE = CharMatcher.is('\n');
 
-  private static boolean hasMultipleNewlines(String s) {
+  static boolean hasMultipleNewlines(String s) {
     return NEWLINE.countIn(s) > 1;
   }
 
   /*
-   * This also eats any trailing whitespace. We would be smart enough to ignore that, anyway --
-   * except in the case of <pre>/<table>, inside which we otherwise leave whitespace intact.
+   * This also eats any trailing whitespace before the newline. We would be smart enough to ignore
+   * that, anyway -- except in the case of <pre>/<table>, inside which we otherwise leave whitespace
+   * intact.
    *
    * We'd remove the trailing whitespace later on (in JavaCommentsHelper.rewrite), but I feel safer
    * stripping it now: It otherwise might confuse our line-length count, which we use for wrapping.
    */
-  private static final Pattern CLASSIC_NEWLINE_PATTERN = compile("[ \t]*\n[ \t]*[*]?[ \t]?");
-  private static final Pattern MARKDOWN_NEWLINE_PATTERN = compile("[ \t]*\n[ \t]*");
+  /*
+   * The leading `///` or `*` characters and shared initial whitespace have been removed at the
+   * point where this pattern is applied.
+   */
+  private static final Pattern NEWLINE_PATTERN = compile("[ \t]*\n");
+  private static final Pattern BLOCKQUOTE_MARKER_PATTERN = compile("> ?");
 
   // We ensure elsewhere that we match this only at the beginning of a line.
   // Only match tags that start with a lowercase letter, to avoid false matches on unescaped

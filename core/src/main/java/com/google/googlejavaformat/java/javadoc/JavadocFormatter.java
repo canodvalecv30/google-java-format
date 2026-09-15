@@ -14,6 +14,7 @@
 
 package com.google.googlejavaformat.java.javadoc;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.googlejavaformat.java.javadoc.JavadocLexer.lex;
 import static java.util.regex.Pattern.CASE_INSENSITIVE;
@@ -24,8 +25,9 @@ import com.google.common.base.CharMatcher;
 import com.google.common.collect.ImmutableList;
 import com.google.googlejavaformat.java.javadoc.JavadocLexer.LexException;
 import com.google.googlejavaformat.java.javadoc.Token.BeginJavadoc;
-import com.google.googlejavaformat.java.javadoc.Token.BlockquoteCloseTag;
-import com.google.googlejavaformat.java.javadoc.Token.BlockquoteOpenTag;
+import com.google.googlejavaformat.java.javadoc.Token.BlockQuoteCloseTag;
+import com.google.googlejavaformat.java.javadoc.Token.BlockQuoteMarker;
+import com.google.googlejavaformat.java.javadoc.Token.BlockQuoteOpenTag;
 import com.google.googlejavaformat.java.javadoc.Token.BrTag;
 import com.google.googlejavaformat.java.javadoc.Token.CodeCloseTag;
 import com.google.googlejavaformat.java.javadoc.Token.CodeOpenTag;
@@ -40,6 +42,8 @@ import com.google.googlejavaformat.java.javadoc.Token.ListItemCloseTag;
 import com.google.googlejavaformat.java.javadoc.Token.ListItemOpenTag;
 import com.google.googlejavaformat.java.javadoc.Token.ListOpenTag;
 import com.google.googlejavaformat.java.javadoc.Token.Literal;
+import com.google.googlejavaformat.java.javadoc.Token.MarkdownBlockQuoteClose;
+import com.google.googlejavaformat.java.javadoc.Token.MarkdownBlockQuoteOpen;
 import com.google.googlejavaformat.java.javadoc.Token.MarkdownCodeSpanEnd;
 import com.google.googlejavaformat.java.javadoc.Token.MarkdownCodeSpanStart;
 import com.google.googlejavaformat.java.javadoc.Token.MarkdownFencedCodeBlock;
@@ -57,6 +61,7 @@ import com.google.googlejavaformat.java.javadoc.Token.SnippetEnd;
 import com.google.googlejavaformat.java.javadoc.Token.TableCloseTag;
 import com.google.googlejavaformat.java.javadoc.Token.TableOpenTag;
 import com.google.googlejavaformat.java.javadoc.Token.Whitespace;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -87,7 +92,7 @@ public final class JavadocFormatter {
           default ->
               throw new IllegalArgumentException("Input does not start with /** or ///: " + input);
         };
-    String inputForLexer = classicJavadoc ? input : ("///" + markdownCommentText(input));
+    String inputForLexer = classicJavadoc ? classicCommentText(input) : markdownCommentText(input);
     ImmutableList<Token> tokens;
     try {
       tokens = lex(inputForLexer, classicJavadoc);
@@ -119,8 +124,10 @@ public final class JavadocFormatter {
         case HeaderOpenTag t -> output.writeHeaderOpen(t);
         case HeaderCloseTag t -> output.writeHeaderClose(t);
         case ParagraphOpenTag t -> output.writeParagraphOpen(standardizePToken(t));
-        case BlockquoteOpenTag t -> output.writeBlockquoteOpenOrClose(t);
-        case BlockquoteCloseTag t -> output.writeBlockquoteOpenOrClose(t);
+        case BlockQuoteOpenTag t -> output.writeBlockQuoteOpen(t);
+        case BlockQuoteCloseTag t -> output.writeBlockQuoteClose(t);
+        case MarkdownBlockQuoteOpen t -> output.writeMarkdownBlockQuoteOpen(t);
+        case MarkdownBlockQuoteClose t -> output.writeMarkdownBlockQuoteClose();
         case PreOpenTag t -> output.writePreOpen(t);
         case PreCloseTag t -> output.writePreClose(t);
         case CodeOpenTag t -> output.writeCodeOpen(t);
@@ -131,7 +138,7 @@ public final class JavadocFormatter {
         case MoeEndStripComment t -> output.writeMoeEndStripComment(t);
         case HtmlComment t -> output.writeHtmlComment(t);
         case BrTag t -> output.writeBr(standardizeBrToken(t));
-        case Whitespace unused -> output.requestWhitespace();
+        case Whitespace t -> output.requestWhitespaceOrBlankLine(t);
         case ForcedNewline unused -> output.writeLineBreakNoAutoIndent();
         case MarkdownHardLineBreak unused -> output.writeMarkdownHardLineBreak();
         case Literal t -> output.writeLiteral(t);
@@ -142,6 +149,7 @@ public final class JavadocFormatter {
         case ParagraphCloseTag unused -> {}
         case MarkdownCodeSpanStart unused -> {}
         case MarkdownCodeSpanEnd unused -> {}
+        case BlockQuoteMarker unused -> {}
       }
     }
     throw new AssertionError();
@@ -202,6 +210,45 @@ public final class JavadocFormatter {
 
   private static final CharMatcher NOT_SPACE_OR_TAB = CharMatcher.noneOf(" \t");
 
+  private static final Pattern CLASSIC_PREFIX_PATTERN = Pattern.compile("^[ \\t]*[*][ \\t]?");
+
+  private static String stripJavadocBeginAndEnd(String input) {
+    checkArgument(input.startsWith("/**"), "Missing /**: %s", input);
+    checkArgument(input.endsWith("*/") && input.length() > 4, "Missing */: %s", input);
+    return input.substring("/**".length(), input.length() - "*/".length());
+  }
+
+  /**
+   * Returns the given classic Javadoc comment after removing the leading ∕✱✱, trailing ✱∕, and any
+   * leading asterisks and common leading whitespace on each line.
+   */
+  private static String classicCommentText(String input) {
+    String stripped = stripJavadocBeginAndEnd(input);
+    List<String> lines = stripped.lines().toList();
+    if (lines.isEmpty()) {
+      // Can't happen: it would only happen for `/***/`, but we filter out comments starting `/***`.
+      return "";
+    }
+    // The first line is handled specially in case we have something like `/** * foo\n * bar\n */`.
+    // The end result should not strip the `*` from `* foo`.
+    List<String> processedLines = new ArrayList<>();
+    processedLines.add(lines.get(0));
+    for (String line : lines.subList(1, lines.size())) {
+      Matcher m = CLASSIC_PREFIX_PATTERN.matcher(line);
+      if (m.find()) {
+        processedLines.add(m.replaceFirst(""));
+      } else {
+        // Input line did not have leading `*`. In that case, it's hard to know what is supposed to
+        // be indentation of the comment as a whole and what is supposed to be indentation of the
+        // content. We just strip all leading whitespace.
+        processedLines.add(line.stripLeading());
+      }
+    }
+    // Unlike Markdown comments, stripping common leading whitespace is not mandated by any
+    // specification. But it's not forbidden either.
+    return stripCommonLeadingWhitespace(processedLines);
+  }
+
   /**
    * Returns the given string with the leading /// and any common leading whitespace removed from
    * each line. The resultant string can then be fed to a standard Markdown parser.
@@ -213,6 +260,10 @@ public final class JavadocFormatter {
             .peek(line -> checkState(line.contains("///"), "Line does not contain ///: %s", line))
             .map(line -> line.substring(line.indexOf("///") + 3))
             .toList();
+    return stripCommonLeadingWhitespace(lines);
+  }
+
+  private static String stripCommonLeadingWhitespace(List<String> lines) {
     int leadingSpace =
         lines.stream()
             .filter(line -> NOT_SPACE_OR_TAB.matchesAnyOf(line))

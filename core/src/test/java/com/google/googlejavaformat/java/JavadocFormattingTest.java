@@ -31,6 +31,21 @@ public final class JavadocFormattingTest {
 
   private final Formatter formatter = new Formatter();
 
+  /**
+   * Tests that the formatter formats the given input string to the given expected string. Also
+   * tests that the formatter is idempotent when formatting an already formatted string.
+   */
+  private void doFormatTest(String input, String expected) {
+    try {
+      String actual = formatter.formatSource(input);
+      assertThat(actual).isEqualTo(expected);
+      String reformatted = formatter.formatSource(actual);
+      assertWithMessage("When checking idempotency").that(reformatted).isEqualTo(actual);
+    } catch (FormatterException e) {
+      throw new AssertionError(e);
+    }
+  }
+
   @Test
   public void notJavadoc() {
     String input =
@@ -94,8 +109,6 @@ public final class JavadocFormattingTest {
 
   @Test
   public void commentMostlyUntouched() {
-    // This test isn't necessarily what we'd want to do, but it's what we do now, and it's OK-ish.
-    @SuppressWarnings("MisleadingEscapedSpace") // TODO(b/496180372): remove
     String input =
         """
         /**
@@ -114,14 +127,28 @@ public final class JavadocFormattingTest {
         /**
          * Foo.
          * <!--
-         *abc
+         * abc
          *   def
          * </tr>
-         *-->
+         * -->
          * bar
          */
         class Test {}
         """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownHtmlComment() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// <!--
+        /// abc
+        /// -->
+        class Test {}
+        """;
+    String expected = input;
     doFormatTest(input, expected);
   }
 
@@ -245,6 +272,31 @@ public final class JavadocFormattingTest {
     String expected =
         """
         /**
+         * Foo.
+         * <!-- moe:end_intracomment_strip -->
+         */
+        class Test {}
+        """
+            .replace("moe", "MOE");
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void moeCommentAtStartOfDoc() {
+    String input =
+        """
+        /**
+         * <!-- moe:begin_intracomment_strip -->
+         * Foo.
+         * <!-- moe:end_intracomment_strip -->
+         */
+        class Test {}\
+        """
+            .replace("moe", "MOE");
+    String expected =
+        """
+        /**
+         * <!-- moe:begin_intracomment_strip -->
          * Foo.
          * <!-- moe:end_intracomment_strip -->
          */
@@ -716,7 +768,6 @@ public final class JavadocFormattingTest {
          * <blockquote>
          *
          * <p>def
-         *
          * </blockquote>
          *
          * ghi
@@ -1706,11 +1757,47 @@ class Test {}
 ///   1. nested thing 1 on more than one line
 ///   2. nested thing 2 on only one line but which is long enough that it is going to need to be
 ///      wrapped
+///
 ///   3. nested thing 3 after a blank line
 ///
 /// A following paragraph.
 class Test {}
 """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownIndentedListItem() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+"""
+/// A list:
+///   - `foo`: enabled by default
+///   - `bar`: disabled by default
+class Test {}
+""";
+    String expected =
+"""
+/// A list:
+/// - `foo`: enabled by default
+/// - `bar`: disabled by default
+class Test {}
+""";
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownEmptyListItem() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+"""
+/// A list with an empty item:
+/// - `foo`: enabled by default
+/// - `bar`: disabled by default
+/// -
+class Test {}
+""";
+    String expected = input;
     doFormatTest(input, expected);
   }
 
@@ -1729,6 +1816,7 @@ class Test {}
 /// -  ```
 ///    code block
 ///    in a list
+///        with an indented line
 ///    ```
 ///
 /// - flibbertigibbet
@@ -1763,6 +1851,7 @@ class Test {}
 /// - ```
 ///   code block
 ///   in a list
+///       with an indented line
 ///   ```
 ///
 /// - flibbertigibbet
@@ -1788,6 +1877,40 @@ class Test {}
 /// ````
 class Test {}
 """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownMoeComments() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// This is the first line.
+        ///
+        /// <!-- moe:begin_intracomment_strip -->
+        /// This is a comment that should be stripped
+        ///
+        /// ```
+        /// this is a code block
+        /// ```
+        /// <!-- moe:end_intracomment_strip -->
+        class Test {}
+        """
+            .replace("moe", "MOE");
+    String expected =
+        """
+        /// This is the first line.
+        ///
+        /// <!-- moe:begin_intracomment_strip -->
+        /// This is a comment that should be stripped
+        ///
+        /// ```
+        /// this is a code block
+        /// ```
+        /// <!-- moe:end_intracomment_strip -->
+        class Test {}
+        """
+            .replace("moe", "MOE");
     doFormatTest(input, expected);
   }
 
@@ -1910,6 +2033,36 @@ class Test {}
   }
 
   @Test
+  public void markdownBlockTagContinuationLines() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+"""
+/// Something something something.
+///
+/// @param foo a parameter with a long description that will need to be wrapped onto multiple
+/// lines, with each line being indented by the default amount for continuation
+/// lines in a block tag.
+///
+/// There is even a second paragraph which illustrates why the indentation should be +2
+/// rather than +4.
+record Test(String foo) {}
+""";
+    String expected =
+"""
+/// Something something something.
+///
+/// @param foo a parameter with a long description that will need to be wrapped onto multiple lines,
+///   with each line being indented by the default amount for continuation lines in a block tag.
+///
+///   There is even a second paragraph which illustrates why the indentation should be +2 rather
+///   than +4.
+record Test(String foo) {}
+""";
+
+    doFormatTest(input, expected);
+  }
+
+  @Test
   public void markdownLinkReferenceDefinitions() {
     assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
     String input =
@@ -1938,15 +2091,24 @@ class Test {}
         /// - item 2
         class Test {}
         """;
-    // TODO: the line break between items should be preserved, and there should not be a blank line
-    //   before the list.
-    String expected =
+    String expected = input;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownListPrecedingBlankLine() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
         """
+        /// Title.
         ///
-        /// - item 1
-        /// - item 2
+        /// Some paragraph.
+        ///
+        /// - Item 1.
+        /// - Item 2.
         class Test {}
         """;
+    String expected = input;
     doFormatTest(input, expected);
   }
 
@@ -1958,12 +2120,111 @@ class Test {}
         /// > foo
         /// > bar
         ///
-        ///
+        /// baz
         class Test {}
         """;
-    // TODO: block quotes are not supported. That means the input is unchanged. We can see this
-    // because the extra blank lines at the end are preserved.
-    String expected = input;
+    String expected =
+        """
+        /// > foo bar
+        ///
+        /// baz
+        class Test {}
+        """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownBlockQuoteWithinListItem() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// 1. item one
+        /// 2. item two
+        ///    - sublist
+        ///    - sublist
+        ///    - > foo
+        ///      > bar
+        class Test {}
+        """;
+    String expected =
+        """
+        /// 1. item one
+        /// 2. item two
+        ///    - sublist
+        ///    - sublist
+        ///    - > foo bar
+        class Test {}
+        """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownNestedBlockQuotes() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// > foo
+        /// > > bar
+        /// > > baz
+        class Test {}
+        """;
+    String expected =
+        """
+        /// > foo
+        /// > > bar baz
+        class Test {}
+        """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownBlockQuoteWithCodeBlockInside() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// > foo
+        /// > ```
+        /// > >
+        /// > ```
+        /// > bar
+        class Test {}
+        """;
+    String expected =
+        """
+        /// > foo
+        /// >
+        /// > ```
+        /// > >
+        /// > ```
+        /// >
+        /// > bar
+        class Test {}
+        """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownBlockQuoteInBlockTag() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+"""
+/// A test class.
+/// @param foo a Foo
+/// > In the reign of James the Second
+/// > It was generally reckoned
+/// > As a very serious crime
+/// > To marry two wives at one time.
+class Test {}
+""";
+    String expected =
+"""
+/// A test class.
+///
+/// @param foo a Foo
+///   > In the reign of James the Second It was generally reckoned As a very serious crime To marry
+///   > two wives at one time.
+class Test {}
+""";
     doFormatTest(input, expected);
   }
 
@@ -2039,15 +2300,207 @@ class Test {}
     doFormatTest(input, expected);
   }
 
-  private void doFormatTest(String input, String expected) {
-    try {
-      String actual = formatter.formatSource(input);
-      assertThat(actual).isEqualTo(expected);
-      String reformatted = formatter.formatSource(actual);
-      assertWithMessage("When checking idempotency").that(reformatted).isEqualTo(actual);
-    } catch (FormatterException e) {
-      throw new AssertionError(e);
-    }
+  @Test
+  public void markdownBlankLinesAroundSnippetAndNoMangling() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// hello world
+        /// {@snippet :
+        /// public class Foo {
+        ///   private String s;
+        /// }
+        /// }
+        /// hello again
+        class Test {}\
+        """;
+    String expected =
+        """
+        /// hello world
+        ///
+        /// {@snippet :
+        /// public class Foo {
+        ///   private String s;
+        /// }
+        /// }
+        ///
+        /// hello again
+        class Test {}
+        """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownLongCommentOnEnumConstant() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+"""
+enum Foo {
+  /// Long long long, longedy long, más fada an lá tig an oíche, chaise longue, caffè lungo, ich bin so lang nicht bei dir gewest
+  BAR,
+}
+""";
+    String expected =
+"""
+enum Foo {
+  /// Long long long, longedy long, más fada an lá tig an oíche, chaise longue, caffè lungo, ich bin
+  /// so lang nicht bei dir gewest
+  BAR,
+}
+""";
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownLongCommentOnPackageDeclaration() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    // A package doc comment is only really valid in package-info.java, but let's assume this is one
+    // of those.
+    String input =
+"""
+/// Long long long, longedy long, más fada an lá tig an oíche, chaise longue, caffè lungo, ich bin so lang nicht bei dir gewest
+package com.example;
+""";
+    String expected =
+"""
+/// Long long long, longedy long, más fada an lá tig an oíche, chaise longue, caffè lungo, ich bin
+/// so lang nicht bei dir gewest
+package com.example;
+""";
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownOrderedListWithParenthesis() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// Summary paragraph.
+        /// 1) first item
+        /// 2) second item
+        class Test {}
+        """;
+    String expected = input;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void markdownBulletListWithPlus() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// Summary paragraph.
+        /// + first item
+        /// + second item
+        class Test {}
+        """;
+    String expected = input;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void tableAtStartOfComment() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// <table>
+        /// <tr><td>Foo</td></tr>
+        /// </table>
+        class Test {}
+        """;
+    String expected = input;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void blockquoteAtStartOfComment() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// <blockquote>
+        /// line 1
+        /// line 2
+        /// </blockquote>
+        class Test {}
+        """;
+    String expected =
+        """
+        /// <blockquote>
+        /// line 1 line 2
+        /// </blockquote>
+        class Test {}
+        """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void preAtStartOfComment() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// <pre>
+        /// line 1
+        /// line 2
+        /// </pre>
+        class Test {}
+        """;
+    String expected = input;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void tableInHtmlListItem() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// <ul>
+        /// <li>
+        /// <table>
+        /// <tr><td>Foo</td></tr>
+        /// </table>
+        /// </li>
+        /// </ul>
+        class Test {}
+        """;
+    // requestBlankLine() in writeTableOpen() inserts a blank line after <li> before <table> when
+    // inside a list item. Also, we might prefer to eliminate the blank lines around the table
+    // element and to indent the table contents and close tag at least as far as the open tag.
+    String expected =
+        """
+        /// <ul>
+        ///   <li>
+        ///
+        ///       <table>
+        /// <tr><td>Foo</td></tr>
+        /// </table>
+        ///
+        /// </ul>
+        class Test {}
+        """;
+    doFormatTest(input, expected);
+  }
+
+  @Test
+  public void tableInsideMarkdownListItemAfterText() {
+    assume().that(MARKDOWN_JAVADOC_SUPPORTED).isTrue();
+    String input =
+        """
+        /// - item text
+        ///   <table>
+        ///   <tr><td>Foo</td></tr>
+        ///   </table>
+        class Test {}
+        """;
+    String expected =
+        """
+        /// - item text
+        ///
+        ///   <table>
+        ///   <tr><td>Foo</td></tr>
+        ///   </table>
+        class Test {}
+        """;
+    doFormatTest(input, expected);
   }
 
   // TODO: b/346668798 - Test the following Markdown constructs, and make the tests work as needed.
@@ -2073,13 +2526,6 @@ class Test {}
   // - Link reference definitions should not be joined onto previous lines.
   //   [foo]: /url "title"
   //   https://spec.commonmark.org/0.31.2/#link-reference-definitions
-  //
-  // - Loose lists
-  //   "A list is loose if any of its constituent list items are separated by blank lines, or if any
-  //   of its constituent list items directly contain two block-level elements with a blank line
-  //   between them."
-  //   We should test that we do not remove blank lines from a loose list, which would make it a
-  //   tight one. https://spec.commonmark.org/0.31.2/#loose
   //
   // - Block quotes
   //   > foo
